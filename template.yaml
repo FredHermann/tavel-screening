@@ -1,136 +1,375 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: A bare bones example of deploying an API Gateway API with one Lambda using an OpenAPI 3.0.1 example spec file as in-line yaml.
+Description: Appointment Scheduling Microservice - A microservice that handles appointment scheduling with SQS consumers and DynamoDB storage.
 
 Parameters:
-
   Name:
     Type: String
-    Description: The name of the API to create, also used as the stack name.
+    Description: The name of the appointment scheduling service, also used as the stack name.
+    Default: appointment-scheduler
 
 Resources:
-
-  Api:
-    Type: AWS::Serverless::Api
+  # DynamoDB Tables
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
     Properties:
-      Name: !Ref Name
-      StageName: live
-      OpenApiVersion: 3.0.1
-      DefinitionBody: 
-        openapi: 3.0.1
-        info:
-          title: Hello World API
-          description: This is a swagger example.
-          contact:
-            email: you@your-company.com
-          license:
-            name: Apache 2.0
-            url: http://www.apache.org/licenses/LICENSE-2.0.html
-          version: 1.0.0
-        paths:
-          /hello/world:
-            get:
-              summary: get hello world
-              description: |
-                Invokes hello world lambda function example.
-              responses:
-                "200":
-                  description: search results matching criteria
-                "400":
-                  description: bad input parameter
-              x-amazon-apigateway-integration:
-                uri:
-                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AddLambdaFunction.Arn}/invocations
-                responses:
-                  default:
-                    statusCode: "200"
-                passthroughBehavior: when_no_match
-                httpMethod: POST
-                contentHandling: CONVERT_TO_TEXT
-                type: aws_proxy
+      TableName: !Sub ${Name}-appointments
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: appointmentId
+          AttributeType: S
+        - AttributeName: patientId
+          AttributeType: S
+        - AttributeName: appointmentDate
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: appointmentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: PatientAppointmentsIndex
+          KeySchema:
+            - AttributeName: patientId
+              KeyType: HASH
+            - AttributeName: appointmentDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: StatusDateIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: appointmentDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
-  AddLambdaFunction:
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Name}-patients
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: patientId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: patientId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: EmailIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # SQS Queues
+  AppointmentRequestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-appointment-requests
+      VisibilityTimeoutSeconds: 60
+      MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AppointmentRequestDLQ.Arn
+        maxReceiveCount: 3
+
+  AppointmentRequestDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-appointment-requests-dlq
+      MessageRetentionPeriod: 1209600
+
+  AppointmentConfirmationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-appointment-confirmations
+      VisibilityTimeoutSeconds: 60
+      MessageRetentionPeriod: 1209600
+
+  AppointmentReminderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-appointment-reminders
+      VisibilityTimeoutSeconds: 60
+      MessageRetentionPeriod: 1209600
+
+  # Lambda Functions
+  AppointmentRequestProcessor:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: add.lambda_handler
-      Runtime: python3.8
-      CodeUri: ./lambdas/add
-      Description: Add
+      FunctionName: !Sub ${Name}-appointment-request-processor
+      Handler: appointment_request_processor.lambda_handler
+      Runtime: python3.9
+      CodeUri: ./src
+      Description: Processes appointment requests from SQS and creates appointments in DynamoDB
       AutoPublishAlias: live
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt AppointmentRequestProcessorRole.Arn
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          PATIENTS_TABLE: !Ref PatientsTable
+          CONFIRMATION_QUEUE_URL: !Ref AppointmentConfirmationQueue
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AppointmentRequestQueue.Arn
+            BatchSize: 10
 
-  CleanInputLambdaFunction:
+  AppointmentConfirmationProcessor:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: cleaninput.lambda_handler
-      Runtime: python3.8
-      CodeUri: ./lambdas/cleaninput
-      Description: Clean Input
+      FunctionName: !Sub ${Name}-appointment-confirmation-processor
+      Handler: appointment_confirmation_processor.lambda_handler
+      Runtime: python3.9
+      CodeUri: ./src
+      Description: Processes appointment confirmations and sends notifications
       AutoPublishAlias: live
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt AppointmentConfirmationProcessorRole.Arn
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          PATIENTS_TABLE: !Ref PatientsTable
+          REMINDER_QUEUE_URL: !Ref AppointmentReminderQueue
 
-  DivideLambdaFunction:
+  AppointmentReminderProcessor:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: divide.lambda_handler
-      Runtime: python3.8
-      CodeUri: ./lambdas/divide
-      Description: Divide
+      FunctionName: !Sub ${Name}-appointment-reminder-processor
+      Handler: appointment_reminder_processor.lambda_handler
+      Runtime: python3.9
+      CodeUri: ./src
+      Description: Processes appointment reminders and sends reminder notifications
       AutoPublishAlias: live
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt AppointmentReminderProcessorRole.Arn
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          PATIENTS_TABLE: !Ref PatientsTable
 
-  MultiplyLambdaFunction:
+  AppointmentQueryProcessor:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: multiply.lambda_handler
-      Runtime: python3.8
-      CodeUri: ./lambdas/multiply
-      Description: Multiply
+      FunctionName: !Sub ${Name}-appointment-query-processor
+      Handler: appointment_query_processor.lambda_handler
+      Runtime: python3.9
+      CodeUri: ./src
+      Description: Handles appointment queries and searches
       AutoPublishAlias: live
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt AppointmentQueryProcessorRole.Arn
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          PATIENTS_TABLE: !Ref PatientsTable
 
-  SubtractLambdaFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Handler: subtract.lambda_handler
-      Runtime: python3.8
-      CodeUri: ./lambdas/subtract
-      Description: Subtract
-      AutoPublishAlias: live
-
-  StateMachine:
-    Type: AWS::Serverless::StateMachine
-    Properties:
-      Name: !Sub statemachine-${AWS::StackName}
-      DefinitionUri: sm_def.yaml
-      DefinitionSubstitutions: 
-        AddLambdaFunction: !Ref AddLambdaFunction
-        CleanInputLambdaFunction: !Ref CleanInputLambdaFunction
-        DivideLambdaFunction: !Ref DivideLambdaFunction
-        MultiplyLambdaFunction: !Ref MultiplyLambdaFunction
-        SubtractLambdaFunction: !Ref SubtractLambdaFunction
-      Role: !GetAtt StateMachineRole.Arn
-
-  StateMachineRole:
+  # IAM Roles and Policies
+  AppointmentRequestProcessorRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub statemachine-role-${AWS::StackName}
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              Service: states.amazonaws.com
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+
+  AppointmentConfirmationProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
-  InvokeFunctionPolicy:
+  AppointmentReminderProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  AppointmentQueryProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # DynamoDB Access Policies
+  AppointmentRequestProcessorDynamoDBPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: !Sub statemachine-invoke-function-policy-${AWS::StackName}
+      PolicyName: !Sub ${Name}-appointment-request-processor-dynamodb-policy
       Roles:
-        - !Ref StateMachineRole
+        - !Ref AppointmentRequestProcessorRole
       PolicyDocument:
-        Version: 2012-10-17
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
-              - lambda:InvokeFunction
-            Resource: '*'
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt AppointmentsTable.Arn
+              - !Sub ${AppointmentsTable.Arn}/index/*
+              - !GetAtt PatientsTable.Arn
+              - !Sub ${PatientsTable.Arn}/index/*
+
+  AppointmentRequestProcessorSQSPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${Name}-appointment-request-processor-sqs-policy
+      Roles:
+        - !Ref AppointmentRequestProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt AppointmentConfirmationQueue.Arn
+
+  AppointmentConfirmationProcessorDynamoDBPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${Name}-appointment-confirmation-processor-dynamodb-policy
+      Roles:
+        - !Ref AppointmentConfirmationProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:Query
+            Resource:
+              - !GetAtt AppointmentsTable.Arn
+              - !Sub ${AppointmentsTable.Arn}/index/*
+              - !GetAtt PatientsTable.Arn
+              - !Sub ${PatientsTable.Arn}/index/*
+
+  AppointmentConfirmationProcessorSQSPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${Name}-appointment-confirmation-processor-sqs-policy
+      Roles:
+        - !Ref AppointmentConfirmationProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt AppointmentReminderQueue.Arn
+
+  AppointmentReminderProcessorDynamoDBPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${Name}-appointment-reminder-processor-dynamodb-policy
+      Roles:
+        - !Ref AppointmentReminderProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:Query
+            Resource:
+              - !GetAtt AppointmentsTable.Arn
+              - !Sub ${AppointmentsTable.Arn}/index/*
+              - !GetAtt PatientsTable.Arn
+              - !Sub ${PatientsTable.Arn}/index/*
+
+  AppointmentQueryProcessorDynamoDBPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${Name}-appointment-query-processor-dynamodb-policy
+      Roles:
+        - !Ref AppointmentQueryProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt AppointmentsTable.Arn
+              - !Sub ${AppointmentsTable.Arn}/index/*
+              - !GetAtt PatientsTable.Arn
+              - !Sub ${PatientsTable.Arn}/index/*
+
+Outputs:
+  AppointmentsTableName:
+    Description: Name of the appointments DynamoDB table
+    Value: !Ref AppointmentsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AppointmentsTable
+
+  PatientsTableName:
+    Description: Name of the patients DynamoDB table
+    Value: !Ref PatientsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-PatientsTable
+
+  AppointmentRequestQueueUrl:
+    Description: URL of the appointment request SQS queue
+    Value: !Ref AppointmentRequestQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-AppointmentRequestQueue
+
+  AppointmentConfirmationQueueUrl:
+    Description: URL of the appointment confirmation SQS queue
+    Value: !Ref AppointmentConfirmationQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-AppointmentConfirmationQueue
+
+  AppointmentReminderQueueUrl:
+    Description: URL of the appointment reminder SQS queue
+    Value: !Ref AppointmentReminderQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-AppointmentReminderQueue
