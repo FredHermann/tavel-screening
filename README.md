@@ -25,7 +25,8 @@ You can use AI tools or any tools you would use on the job.
 The observability of the lambda function is missing some important pieces. When the lambda function fails, there are no alarms that alert the developers. This change is critically important because the lambda function could be silently failing right now and we wouldn't know unless we looked at the lambda's metrics.
 
 ## Solution
-The solution to this is to implement CloudWatch Alarms. These can be implemented by adding them to the `template.yaml` file. THe documentation for this is [here](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-cloudwatch-alarm.html). We should alarm on:
+The solution to this is to implement CloudWatch Alarms. These can be implemented by adding them to the `template.yaml` file. The documentation for this is [here](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-cloudwatch-alarm.html). We should alarm on:
 - any errors
 - when the duration of the lambda spikes in an anomyolous way
 - when the lambda function is throttled
+We need to setup an SNS topic that has our email addresses subscribed so we recieve alerts.
