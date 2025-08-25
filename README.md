@@ -1,5 +1,5 @@
 # Dr. Tavel Screening Environment
-This repo is setup based upon the example avialable here: https://github.com/aws-samples/aws-sam-github-actions-example/tree/main
+This repo is setup based upon the example available here: https://github.com/aws-samples/aws-sam-github-actions-example/tree/main
 
 # The Test
 This test is designed to be open ended and does not have any specific tasks. The main goal is to test your instincts of how to improve existing systems. You can bring up anything you don't like or would change about this repo. This includes (but is not limited to):
@@ -10,10 +10,11 @@ This test is designed to be open ended and does not have any specific tasks. The
 - We should add more observability or alerting, for example: ...
 - The tests do not have value because: ...
 - We should only use PRs to make changes because: ...
+- We should refactor the file `my_lambda.py` because: ...
 
-Be as specific about changes as possible. Please do not write any code or open any issues. You can send a markdown file with your reccomendations to Fred. There should be enough detail that someone else could pick up the ticket and do it.
+Be as specific about changes as possible. Please do not write any code or open any issues. You can send a markdown file with your recommendations to Fred. There should be enough detail that someone else could pick up the ticket and do it.
 
-Assume that what you see in the repo deploys and runs. Also assume that what you see in the repo is the entire stack of the microservice. You will not be marked down for missing any runtime issues. Focus on improvements to the architecture, infrastructure, pipeline, developer experience, and testing. 
+Assume that what you see in the repo deploys and runs. Also assume that what you see in the repo is the entire stack of the microservice. You will not be marked down for missing any runtime issues. Focus on improvements to the architecture, infrastructure, pipeline, code quality, developer experience, and testing. 
 
 This test is exactly what you will be doing on the job! You will need to improve upon existing systems in a safe and efficient way.
 
@@ -27,6 +28,6 @@ The observability of the lambda function is missing some important pieces. When 
 ## Solution
 The solution to this is to implement CloudWatch Alarms. These can be implemented by adding them to the `template.yaml` file. The documentation for this is [here](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-cloudwatch-alarm.html). We should alarm on:
 - any errors
-- when the duration of the lambda spikes in an anomyolous way
+- when the duration of the lambda spikes in an anomalous way
 - when the lambda function is throttled
-We need to setup an SNS topic that has our email addresses subscribed so we recieve alerts.
+We need to setup an SNS topic that has our email addresses subscribed so we receive alerts.
